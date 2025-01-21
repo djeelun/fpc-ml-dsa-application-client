@@ -1,0 +1,294 @@
+/*
+Copyright IBM Corp. All Rights Reserved.
+Copyright 2020 Intel Corporation
+
+SPDX-License-Identifier: Apache-2.0
+*/
+
+package main
+
+import (
+	"encoding/json"
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"errors"
+	"net/http"
+
+	"github.com/rs/cors"
+
+	"github.com/hyperledger/fabric-private-chaincode/client_sdk/go/pkg/client/resmgmt"
+	fpc "github.com/hyperledger/fabric-private-chaincode/client_sdk/go/pkg/gateway"
+	"github.com/hyperledger/fabric-private-chaincode/client_sdk/go/pkg/sgx"
+	"github.com/hyperledger/fabric-sdk-go/pkg/core/config"
+	"github.com/hyperledger/fabric-sdk-go/pkg/fabsdk"
+	"github.com/hyperledger/fabric-sdk-go/pkg/gateway"
+	"github.com/hyperledger/fabric/common/flogging"
+)
+
+var logger = flogging.MustGetLogger("sdk-test")
+
+func firstFileInPath(dir string) (string, error) {
+	// there's a single file in this dir containing the private key
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		return "", err
+	}
+	if len(files) != 1 {
+		return "", fmt.Errorf("folder should contain only a single file")
+	}
+	return filepath.Join(dir, files[0].Name()), nil
+}
+
+func populateWallet(wallet *gateway.Wallet, mspPath, mspId, userId string) error {
+	certPath, err := firstFileInPath(filepath.Join(mspPath, "signcerts"))
+	if err != nil {
+		return err
+	}
+
+	cert, err := os.ReadFile(filepath.Clean(certPath))
+	if err != nil {
+		return err
+	}
+
+	keyPath, err := firstFileInPath(filepath.Join(mspPath, "keystore"))
+	if err != nil {
+		return err
+	}
+
+	key, err := os.ReadFile(filepath.Clean(keyPath))
+	if err != nil {
+		return err
+	}
+
+	identity := gateway.NewX509Identity(mspId, string(cert), string(key))
+
+	return wallet.Put(userId, identity)
+}
+
+func getEnvWithFallback(key, fallback string) string {
+	value, exists := os.LookupEnv(key)
+	if !exists {
+		value = fallback
+	}
+	return value
+}
+
+func getEnvWithPanic(key string) string {
+	value, exists := os.LookupEnv(key)
+	if !exists {
+		panic(key + " not set")
+	}
+	return value
+}
+
+func setEnvWithPanic(key, value string) {
+	err := os.Setenv(key, value)
+	if err != nil {
+		panic(fmt.Sprintf("Error setting %s environment variable: %v", key, err))
+	}
+}
+
+func main() {
+	withLifecycleInitEnclave := flag.Bool("withLifecycleInitEnclave", false, "run with lifecycleInitEnclave")
+	flag.Parse()
+
+	setEnvWithPanic("GRPC_TRACE", "all")
+	setEnvWithPanic("GRPC_VERBOSITY", "DEBUG")
+	setEnvWithPanic("GRPC_GO_LOG_SEVERITY_LEVEL", "INFO")
+	setEnvWithPanic("DISCOVERY_AS_LOCALHOST", "true")
+
+	// let's make sure FPC_PATH is set
+	fpcPath := getEnvWithPanic("FPC_PATH")
+
+	ccID := getEnvWithFallback("CC_ID", "ml-dsa")
+	channelID := getEnvWithFallback("CHANNEL_ID", "mychannel")
+	orgName := getEnvWithFallback("ORG_NAME", "Org1")
+	orgNameFull := getEnvWithFallback("ORG_NAME_FULL", strings.ToLower(orgName)+".example.com")
+	mspId := getEnvWithFallback("MSP_ID", orgName+"MSP")
+	userId := getEnvWithFallback("USER_ID", "User1")
+
+	// we use the mspPath and connections profil provided by the fabric-samples test network if not specified by the user
+	testNetworkPath := filepath.Join(fpcPath, "samples", "deployment", "test-network", "fabric-samples", "test-network")
+
+	// If not set we use the msp folder in the fabric-samples test network
+	mspPath := getEnvWithFallback("MSP_PATH", filepath.Join(
+		testNetworkPath,
+		"organizations",
+		"peerOrganizations",
+		orgNameFull,
+		"users",
+		fmt.Sprintf("%s@%s", userId, orgNameFull),
+		"msp",
+	))
+
+	// If not set we use the msp folder in the fabric-samples test network
+	ccpPath := getEnvWithFallback("CCP_PATH", filepath.Join(
+		testNetworkPath,
+		"organizations",
+		"peerOrganizations",
+		orgNameFull,
+		fmt.Sprintf("connection-%s.yaml", strings.ToLower(orgName)),
+	))
+
+	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	// FPC Client SDK Lifecycle API example
+	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+	// if we call this app with the "-withLifecycleInitEnclave" flag
+	if *withLifecycleInitEnclave {
+
+		sdk, err := fabsdk.New(config.FromFile(filepath.Clean(ccpPath)))
+		if err != nil {
+			logger.Fatalf("failed to create sdk: %v", err)
+		}
+		defer sdk.Close()
+
+		orgAdmin := "Admin"
+
+		adminContext := sdk.Context(fabsdk.WithUser(orgAdmin), fabsdk.WithOrg(orgName))
+		adminClient, err := resmgmt.New(adminContext)
+		if err != nil {
+			logger.Fatal(err)
+		}
+
+		attestationParams, err := sgx.CreateAttestationParamsFromEnvironment()
+		if err != nil {
+			logger.Fatal(err)
+		}
+
+		initReq := resmgmt.LifecycleInitEnclaveRequest{
+			ChaincodeID:         ccID,
+			EnclavePeerEndpoint: "peer0." + orgNameFull, // define the peer where we wanna init our enclave
+			AttestationParams:   attestationParams,
+		}
+
+		logger.Infof("--> Invoke LifecycleInitEnclave")
+		_, err = adminClient.LifecycleInitEnclave(channelID, initReq)
+		if err != nil {
+			logger.Fatalf("Failed to invoke LifecycleInitEnclave: %v", err)
+		}
+	}
+
+	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	// Setup Fabric Gateway
+	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+	wallet := gateway.NewInMemoryWallet()
+	err := populateWallet(wallet, mspPath, mspId, userId)
+	if err != nil {
+		logger.Fatalf("Failed to populate wallet contents: %v", err)
+	}
+
+	gw, err := gateway.Connect(
+		gateway.WithConfig(config.FromFile(filepath.Clean(ccpPath))),
+		gateway.WithIdentity(wallet, userId),
+	)
+	if err != nil {
+		logger.Fatalf("Failed to connect to gateway: %v", err)
+	}
+	defer gw.Close()
+
+	network, err := gw.GetNetwork(channelID)
+	if err != nil {
+		logger.Fatalf("Failed to get network: %v", err)
+	}
+
+	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	// FPC Client SDK contract API
+	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+	// Get FPC Contract
+	contract := fpc.GetContract(network, ccID)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/verifySig", func(w http.ResponseWriter, r *http.Request) {
+		getVerifySig(w, r, contract)
+	})
+
+	portNr := ":3333"
+	logger.Infof("Server listening on port %s...", portNr)
+	handler := cors.Default().Handler(mux)
+
+	serverErr := http.ListenAndServe(portNr, handler)
+	if errors.Is(serverErr, http.ErrServerClosed) {
+		fmt.Printf("server closed\n")
+	} else if serverErr != nil {
+		fmt.Printf("error starting server: %s\n", serverErr)
+		os.Exit(1)
+	}
+}
+
+// All fields are required
+type RequestData struct {
+	Sig string `json:"sig"`
+	Msg string `json:"m"`
+	Ctx string `json:"ctx"`
+	Pk  string `json:"pk"`
+}
+
+type Response struct {
+	Ok      bool   `json:"ok"`
+	Message string `json:"message"`
+}
+
+func getVerifySig(w http.ResponseWriter, r *http.Request, contract fpc.Contract) {
+	logger.Info("got /verifySig request\n")
+
+	// Decode JSON from the request body
+	var data RequestData
+	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Validate required fields
+	if data.Sig == "" {
+		http.Error(w, "Missing required field: sig", http.StatusBadRequest)
+		return
+	}
+	if data.Msg == "" {
+		http.Error(w, "Missing required field: m", http.StatusBadRequest)
+		return
+	}
+	// if data.Ctx == "" {
+		// http.Error(w, "Missing required field: ctx", http.StatusBadRequest)
+		// return
+	// }
+	if data.Pk == "" {
+		http.Error(w, "Missing required field: pk", http.StatusBadRequest)
+		return
+	}
+
+	// Log the decoded data
+	// fmt.Printf("Decoded JSON: %+v\n", data)
+
+	// Invoke FPC Chaincode
+	logger.Infof("--> Invoke FPC chaincode: %s", contract.Name())
+	result, err := contract.SubmitTransaction("verifySig", data.Sig, data.Msg, data.Ctx, data.Pk)
+	if err != nil {
+		logger.Errorf("Failed to Submit transaction: %v", err)
+		http.Error(w, "Something went wrong.\n", http.StatusInternalServerError)
+    return
+	}
+	logger.Infof("--> Result: %s", string(result))
+
+	response := Response{
+		Ok:      true,
+		Message: string(result),
+	}
+
+	// Convert the response map to JSON
+	jsonData, err := json.Marshal(response)
+	if err != nil {
+		logger.Errorf("Failed to generate JSON : %v", err)
+		http.Error(w, "Failed to generate JSON", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(jsonData)
+}
