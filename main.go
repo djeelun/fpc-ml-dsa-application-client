@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+  "strconv"
 
 	"errors"
 	"net/http"
@@ -224,10 +225,11 @@ func main() {
 
 // All fields are required
 type RequestData struct {
-	Sig string `json:"sig"`
-	Msg string `json:"m"`
-	Ctx string `json:"ctx"`
-	Pk  string `json:"pk"`
+	Sig   string  `json:"sig"`
+	Msg   string  `json:"m"`
+	Ctx   string  `json:"ctx"`
+	Pk    string  `json:"pk"`
+	Algo  int     `json:"algo"`
 }
 
 type Response struct {
@@ -262,13 +264,17 @@ func getVerifySig(w http.ResponseWriter, r *http.Request, contract fpc.Contract)
 		http.Error(w, "Missing required field: pk", http.StatusBadRequest)
 		return
 	}
+	if data.Algo == 0 {
+		http.Error(w, "Missing required field: algo", http.StatusBadRequest)
+		return
+	}
 
 	// Log the decoded data
 	// fmt.Printf("Decoded JSON: %+v\n", data)
 
 	// Invoke FPC Chaincode
 	logger.Infof("--> Invoke FPC chaincode: %s", contract.Name())
-	result, err := contract.SubmitTransaction("verifySig", data.Sig, data.Msg, data.Ctx, data.Pk)
+	result, err := contract.SubmitTransaction("verifySig", data.Sig, data.Msg, data.Ctx, data.Pk, strconv.Itoa(data.Algo))
 	if err != nil {
 		logger.Errorf("Failed to Submit transaction: %v", err)
 		http.Error(w, "Something went wrong.\n", http.StatusInternalServerError)
