@@ -210,6 +210,18 @@ func main() {
 		getVerifySig(w, r, contract)
 	})
 
+	mux.HandleFunc("/putCipher", func(w http.ResponseWriter, r *http.Request) {
+		putCipher(w, r, contract)
+	})
+
+	mux.HandleFunc("/getCipher", func(w http.ResponseWriter, r *http.Request) {
+		getCipher(w, r, contract)
+	})
+
+	mux.HandleFunc("/updateCipher", func(w http.ResponseWriter, r *http.Request) {
+		updateCipher(w, r, contract)
+	})
+
 	portNr := ":3333"
 	logger.Infof("Server listening on port %s...", portNr)
 	handler := cors.Default().Handler(mux)
@@ -223,7 +235,7 @@ func main() {
 	}
 }
 
-// All fields are required
+// All fields except for Ctx are required
 type RequestData struct {
 	Sig   string  `json:"sig"`
 	Msg   string  `json:"m"`
@@ -248,33 +260,148 @@ func getVerifySig(w http.ResponseWriter, r *http.Request, contract fpc.Contract)
 	}
 
 	// Validate required fields
-	if data.Sig == "" {
-		http.Error(w, "Missing required field: sig", http.StatusBadRequest)
+	if data.Sig == "" || data.Msg == "" || data.Pk == "" || data.Algo == 0 {
+		http.Error(w, "Missing required fields", http.StatusBadRequest)
 		return
 	}
-	if data.Msg == "" {
-		http.Error(w, "Missing required field: m", http.StatusBadRequest)
-		return
-	}
-	// if data.Ctx == "" {
-		// http.Error(w, "Missing required field: ctx", http.StatusBadRequest)
-		// return
-	// }
-	if data.Pk == "" {
-		http.Error(w, "Missing required field: pk", http.StatusBadRequest)
-		return
-	}
-	if data.Algo == 0 {
-		http.Error(w, "Missing required field: algo", http.StatusBadRequest)
-		return
-	}
-
-	// Log the decoded data
-	// fmt.Printf("Decoded JSON: %+v\n", data)
 
 	// Invoke FPC Chaincode
 	logger.Infof("--> Invoke FPC chaincode: %s", contract.Name())
 	result, err := contract.SubmitTransaction("verifySig", data.Sig, data.Msg, data.Ctx, data.Pk, strconv.Itoa(data.Algo))
+	if err != nil {
+		logger.Errorf("Failed to Submit transaction: %v", err)
+		http.Error(w, "Something went wrong.\n", http.StatusInternalServerError)
+    return
+	}
+	logger.Infof("--> Result: %s", string(result))
+
+	response := Response{
+		Ok:      true,
+		Message: string(result),
+	}
+
+	// Convert the response map to JSON
+	jsonData, err := json.Marshal(response)
+	if err != nil {
+		logger.Errorf("Failed to generate JSON : %v", err)
+		http.Error(w, "Failed to generate JSON", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(jsonData)
+}
+
+// All fields are required
+type PutCipherRequestData struct {
+	CipherID string `json:"cipherId"`
+	Ciphertext string `json:"ciphertext"`
+}
+
+func putCipher(w http.ResponseWriter, r *http.Request, contract fpc.Contract) {
+	logger.Info("got /putCipher request\n")
+
+	// Decode JSON from the request body
+	var data PutCipherRequestData
+	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Validate required fields
+	if data.CipherID == "" || data.Ciphertext == "" {
+		http.Error(w, "Missing required fields", http.StatusBadRequest)
+		return
+	}
+
+	// Invoke FPC Chaincode
+	logger.Infof("--> Invoke FPC chaincode: %s", contract.Name())
+	result, err := contract.SubmitTransaction("putCipher", data.CipherID, data.Ciphertext)
+	if err != nil {
+		logger.Errorf("Failed to Submit transaction: %v", err)
+		http.Error(w, "Something went wrong.\n", http.StatusInternalServerError)
+    return
+	}
+	logger.Infof("--> Result: %s", string(result))
+
+	response := Response{
+		Ok:      true,
+		Message: string(result),
+	}
+
+	// Convert the response map to JSON
+	jsonData, err := json.Marshal(response)
+	if err != nil {
+		logger.Errorf("Failed to generate JSON : %v", err)
+		http.Error(w, "Failed to generate JSON", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(jsonData)
+}
+
+// All fields are required
+type GetCipherRequestData struct {
+	CipherID string `json:"cipherId"`
+}
+
+func getCipher(w http.ResponseWriter, r *http.Request, contract fpc.Contract) {
+	logger.Info("got /getCipher request\n")
+
+	// Decode JSON from the request body
+	var data GetCipherRequestData
+	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Validate required fields
+	if data.CipherID == "" {
+		http.Error(w, "Missing required fields", http.StatusBadRequest)
+		return
+	}
+	logger.Infof("--> CipherID: %s", data.CipherID)
+
+	// Invoke FPC Chaincode
+	logger.Infof("--> Invoke FPC chaincode: %s", contract.Name())
+	result, err := contract.SubmitTransaction("getCipher", data.CipherID)
+	if err != nil {
+		logger.Errorf("Failed to Submit transaction: %v", err)
+		http.Error(w, "Something went wrong.\n", http.StatusInternalServerError)
+    return
+	}
+	logger.Infof("--> Result: %s", string(result))
+
+	w.Header().Set("Content-Type", "text/plain")
+	w.Write([]byte(result))
+}
+
+// All fields are required
+type UpdateCipherRequestData struct {
+	CipherID string `json:"cipherId"`
+	Token string `json:"token"`
+}
+
+func updateCipher(w http.ResponseWriter, r *http.Request, contract fpc.Contract) {
+	logger.Info("got /updateCipher request\n")
+
+	// Decode JSON from the request body
+	var data UpdateCipherRequestData
+	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Validate required fields
+	if data.CipherID == "" || data.Token == "" {
+		http.Error(w, "Missing required fields", http.StatusBadRequest)
+		return
+	}
+
+	// Invoke FPC Chaincode
+	logger.Infof("--> Invoke FPC chaincode: %s", contract.Name())
+	result, err := contract.SubmitTransaction("updateCipher", data.CipherID, data.Token)
 	if err != nil {
 		logger.Errorf("Failed to Submit transaction: %v", err)
 		http.Error(w, "Something went wrong.\n", http.StatusInternalServerError)
